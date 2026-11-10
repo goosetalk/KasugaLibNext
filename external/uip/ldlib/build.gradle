@@ -179,14 +179,17 @@ dependencies {
     }
 
 
-    compileOnly project(":modules:core")
-    compileOnly project(":modules:inject")
-    compileOnly project(":modules:utils")
-    compileOnly project(":modules:annotations")
-    compileOnlyApi project(":modules:modelling")
-    compileOnly project(":modules:scripting")
+    // project(...) is not resolvable while the dependencies block is configured: a composite build fixes
+    // the parent to the root project, so the path would be looked up from there. Resolve through the
+    // root project's findProject instead and keep the identical dependency shape.
+    compileOnly(rootProject.findProject(":modules:core"))
+    compileOnly(rootProject.findProject(":modules:inject"))
+    compileOnly(rootProject.findProject(":modules:utils"))
+    compileOnly(rootProject.findProject(":modules:annotations"))
+    compileOnlyApi(rootProject.findProject(":modules:modelling"))
+    compileOnly(rootProject.findProject(":modules:scripting"))
 
-    runtimeOnly (project(":modules:library")) {
+    runtimeOnly (rootProject.findProject(":modules:library")) {
         transitive = false
         attributes {
             attribute(Bundling.BUNDLING_ATTRIBUTE, objects.named(Bundling, Bundling.SHADOWED))
