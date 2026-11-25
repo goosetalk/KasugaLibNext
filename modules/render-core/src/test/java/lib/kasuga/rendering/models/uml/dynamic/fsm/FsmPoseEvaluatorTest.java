@@ -28,11 +28,46 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FsmPoseEvaluatorTest {
 
     private static final float DT = 1f / 20f;
+
+    @Test
+    void synchronousTickKeepsTheCommittedPoseAndMachineStateOnFailure() {
+        StateMachine<Object> machine = StateMachine.<Object>builder(new Object())
+                .layer("loco", layer -> {
+                    State<Object> idle = layer.state("idle").durationTicks(1).morph("m", 0.25f);
+                    State<Object> active = layer.state("active").morph("m", 1f);
+                    layer.initial(idle);
+                    layer.transition("activate", idle, active).whenComplete();
+                })
+                .build();
+        AtomicInteger providerCalls = new AtomicInteger();
+        FsmPoseEvaluator evaluator = new FsmPoseEvaluator(machine, (ignored, delta, variables) -> {
+            int call = providerCalls.incrementAndGet();
+            variables.put("speed", (float) call);
+            if (call == 2) throw new IllegalStateException("provider failed");
+        });
+
+        evaluator.advanceTick(DT);
+        PoseOutput committed = evaluator.currentOutput();
+        assertEquals(0.25f, committed.pose().morphs().get("m").value());
+
+        assertThrows(IllegalStateException.class, () -> evaluator.advanceTick(DT));
+        assertEquals(1, machine.tickCount());
+        assertEquals("idle", machine.activeStateId("loco"));
+        assertEquals(1f, evaluator.variables().get("speed").floatValue());
+        assertSame(committed, evaluator.currentOutput());
+
+        evaluator.advanceTick(DT);
+        assertEquals(2, machine.tickCount());
+        assertEquals("active", machine.activeStateId("loco"));
+        assertEquals(1f, evaluator.currentOutput().pose().morphs().get("m").value());
+    }
 
     @Test
     void scopeAdvancesTheMachineOnceAndPublishesItsResultPose() {
@@ -162,10 +197,16 @@ class FsmPoseEvaluatorTest {
                 Id.fromNamespaceAndPath("kasuga_lib", "logical_formula"),
                 1f,
                 List.of(), List.of(), List.of(),
-                List.of(new AnimationClip.FunctionTrack(
+                List.of(),
+                List.of(),
+                List.of(AnimationClip.FormulaTransformTrack.bone(
                         "formula",
-                        AnimationClip.FunctionChannel.TRANSLATE,
-                        "query.angle", "", "")));
+                        new AnimationClip.FormulaTransform(
+                                new AnimationClip.FormulaVector("query.angle", "", ""),
+                                AnimationClip.FormulaVector.EMPTY,
+                                AnimationClip.FormulaVector.EMPTY
+                        )
+                )));
         StateMachine<Object> machine = StateMachine.<Object>builder(new Object())
                 .layer("loco", layer -> {
                     State<Object> state = layer.state("state")

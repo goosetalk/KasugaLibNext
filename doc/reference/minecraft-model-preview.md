@@ -38,6 +38,19 @@ minecraft.setScreen(new MinecraftModelPreviewScreen(Component.literal("末地城
 | Create 已加载的蓝图模板 | `CreateModelSources.schematic(level, StructureTemplate)` |
 | 本机 Create 结构 NBT | `CreateModelSources.schematic(level, Path)` |
 
+方块模型可以读取紧凑的非空气方块尺寸；`length` 对应 X、`width` 对应 Z、`height` 对应 Y，
+三个值都是方块格数量：
+
+```java
+var size = source.dimensions().orElseThrow();
+int length = size.length();
+int width = size.width();
+int height = size.height();
+```
+
+`BlockModelSource.dimensions()` 在 source 构造时计算并缓存，不依赖相机、显示变换或分层爆炸。
+空 source 返回 `Optional.empty()`。文件声明尺寸与最外层非空气方块不同；本接口返回后者。
+
 Create 工厂位于可选的 `modules/create`，包名为 `lib.kasuga.create.client.model`。公共建模模块
 不直接依赖 Create。完整 Contraption 使用 Create 自己的 `ContraptionRenderInfo` 几何与
 `MovementBehaviour.renderInContraption`；完整蓝图使用 Create `SchematicRenderer`。
@@ -114,6 +127,9 @@ scene.add(source, new Vec3(10, 70, 10))
         .transform(new Matrix4f().rotateY(.4f).scale(.75f));
 // 场景结束时 scene.close()；换世界也会自动释放。
 ```
+
+跟随 Create 移动结构时使用 `scene.add(source, CreateSceneHosts.contraption(entity))`；
+模型和附属 UI 共用宿主姿态，详见[移动结构上的场景与 UI](moving-scene-hosts.md)。
 
 位置为世界坐标；玩家绕行时模型保持原位，深度与世界共享。`Entry.position(...)` 可移动模型，
 `transform(...)` 设置局部旋转/缩放，`visible(false)` 隐藏；这些操作和 scene 的创建/关闭都在渲染线程。

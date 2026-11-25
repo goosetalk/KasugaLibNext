@@ -5,6 +5,7 @@ import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.shaders.Uniform;
 import lib.kasuga.rendering.models.mc.Constants;
+import lib.kasuga.rendering.models.mc.backend.ModelLighting;
 import lib.kasuga.rendering.models.uml.math.Transform;
 import lombok.Getter;
 import lombok.Setter;
@@ -20,6 +21,7 @@ import org.lwjgl.opengl.GL20;
 import org.lwjgl.opengl.GL31;
 
 import java.io.IOException;
+import java.util.Objects;
 
 public class KasugaShaderInstance extends ShaderInstance {
 
@@ -42,7 +44,6 @@ public class KasugaShaderInstance extends ShaderInstance {
     @Getter
     private float stylizedShadingStrength = 0.65f;
 
-    private float brightness = 1.0f;
     private int packedLight = 0;
     private int packedOverlay = 0;
     private boolean gpuSkinningEnabled = false;
@@ -50,6 +51,17 @@ public class KasugaShaderInstance extends ShaderInstance {
     private int alphaMode = 0;
     /** 0 = normal output, 1 = weighted accumulation, 2 = revealage. */
     private int oitMode = 0;
+    private ModelLighting lighting = ModelLighting.PBR;
+
+    public void setLighting(ModelLighting lighting) {
+        this.lighting = Objects.requireNonNull(lighting, "lighting");
+    }
+
+    protected void applyLighting() {
+        safeGetUniform("ksg_LightingMode").set(lighting.shaderMode());
+        safeGetUniform("ksg_BlockShade").set(
+                lighting.downShade(), lighting.upShade(), lighting.zShade(), lighting.xShade());
+    }
 
     @Setter
     private @Nullable PoseStack.Pose currentPose;
@@ -120,8 +132,7 @@ public class KasugaShaderInstance extends ShaderInstance {
         setStylizedShadingStrength(0f);
     }
 
-    public void setLightData(float brightness, int packedLight, int packedOverlay) {
-        this.brightness = brightness;
+    public void setLightData(int packedLight, int packedOverlay) {
         this.packedLight = packedLight;
         this.packedOverlay = packedOverlay;
     }
@@ -151,13 +162,13 @@ public class KasugaShaderInstance extends ShaderInstance {
     }
 
     protected void applyAdditionalData() {
+        applyLighting();
         // TODO: 记得同步修改着色器的相关系数
         this.safeGetUniform("ksg_EmissiveStrength").set(this.emissiveStrength);
         this.safeGetUniform("ksg_ParallaxScale").set(this.parallaxScale);
         this.safeGetUniform("ksg_ParallaxSamples").set(this.parallaxSamplerTimes);
         this.safeGetUniform("ksg_AmbientLightEnhancement").set(this.ambientLightEnhancement);
         this.safeGetUniform("ksg_StylizedShadingStrength").set(this.stylizedShadingStrength);
-        this.safeGetUniform("ksg_BrightnessScale").set(this.brightness);
         this.safeGetUniform("ksg_PackedLight").set(this.packedLight & 0xffff, (this.packedLight >>> 16) & 0xffff);
         this.safeGetUniform("ksg_PackedOverlay").set(this.packedOverlay & 0xffff, (this.packedOverlay >>> 16) & 0xffff);
         this.safeGetUniform("ksg_GpuSkinningEnabled").set(this.gpuSkinningEnabled ? 1 : 0);

@@ -39,6 +39,21 @@ A short left click inspects a block's name, registry ID and source coordinates; 
 | Create schematic item / template | `CreateModelSources.schematic(level, ItemStack or StructureTemplate)` |
 | Local Create structure NBT | `CreateModelSources.schematic(level, Path)` |
 
+Block-backed sources can report tight non-air block dimensions. `length` maps to X, `width` to Z and
+`height` to Y; all three are block-grid counts:
+
+```java
+var size = source.dimensions().orElseThrow();
+int length = size.length();
+int width = size.width();
+int height = size.height();
+```
+
+`BlockModelSource.dimensions()` is computed and cached when the source is constructed. Camera and
+display transforms, as well as layer explosion spacing, do not affect it. Empty sources return
+`Optional.empty()`. The result describes the outermost non-air blocks rather than a file's declared
+size.
+
 Create factories live in the optional `modules/create`, in `lib.kasuga.create.client.model`.
 The common modelling module does not link Create classes. Assembled structures reuse
 `ContraptionRenderInfo` and `SchematicRenderer`; actors use `MovementBehaviour.renderInContraption`.
@@ -111,6 +126,8 @@ scene.add(source, new Vec3(10, 70, 10))
 ```
 
 `SceneModels` draws before shared world post-processing. Use a separate source for another owner.
+To follow a Create contraption, use `scene.add(source, CreateSceneHosts.contraption(entity))`;
+see [Scenes and UI on moving structures](moving-scene-hosts.en.md) for shared model/UI placement.
 Positions are world coordinates: the model stays fixed as players walk around it. `Entry.position`
 moves it, `transform` sets local rotation/scale, and `visible(false)` hides it. Use the render thread.
 Development examples live in `test.kasuga.modelling.demo.preview` and `test.kasuga.create.demo.preview`.

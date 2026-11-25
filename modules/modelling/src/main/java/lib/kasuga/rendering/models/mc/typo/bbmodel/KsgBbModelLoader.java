@@ -3,6 +3,7 @@ package lib.kasuga.rendering.models.mc.typo.bbmodel;
 import com.google.gson.JsonParseException;
 import lib.kasuga.rendering.models.mc.Constants;
 import lib.kasuga.rendering.models.mc.backend.RenderState;
+import lib.kasuga.rendering.models.mc.java_and_bedrock.IdentifierHelper;
 import lib.kasuga.rendering.models.mc.java_and_bedrock.data.MCTexture;
 import lib.kasuga.rendering.models.mc.java_and_bedrock.data.MCTextureData;
 import lib.kasuga.rendering.models.mc.source.texture.KasugaTextureManager;
@@ -28,11 +29,13 @@ import net.minecraft.resources.ResourceLocation;
 import org.joml.Quaternionf;
 import org.joml.Vector2f;
 import org.joml.Vector3f;
+import org.jetbrains.annotations.Nullable;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -53,16 +56,29 @@ public final class KsgBbModelLoader implements ModelLoader<String, ResourceLocat
 
     @Override
     public Map<ResourceLocation, Model> load(ResourceLocation identifier, String input) {
-        BbModelDefinition definition;
-        try {
-            definition = BbModelDefinition.parse(input);
-        } catch (IllegalArgumentException | JsonParseException exception) {
-            throw new IllegalArgumentException("Invalid Blockbench model " + identifier, exception);
-        }
-
+        BbModelDefinition definition = parse(identifier, input);
         Map<Integer, Material> materials = buildMaterials(identifier, definition);
         Model model = buildSkeletonAndGeometry(definition, materials, materialSetBuilder.endMaterialSet());
         return Map.of(identifier, model);
+    }
+
+    /** Uses the rendering loader's geometry, bind pose and clips without decoding images or accessing an atlas. */
+    public static Model loadGeometry(ResourceLocation identifier, String input) {
+        BbModelDefinition definition = parse(identifier, input);
+        Material placeholder = new Material(new Texture[0], null);
+        Map<Integer, Material> materials = new HashMap<>();
+        for (BbModelDefinition.Texture texture : definition.textures()) {
+            materials.put(textureReference(texture), placeholder);
+        }
+        return buildSkeletonAndGeometry(definition, materials, new MaterialSet(List.of(), List.of(placeholder)));
+    }
+
+    private static BbModelDefinition parse(ResourceLocation identifier, String input) {
+        try {
+            return BbModelDefinition.parse(input);
+        } catch (IllegalArgumentException | JsonParseException exception) {
+            throw new IllegalArgumentException("Invalid Blockbench model " + identifier, exception);
+        }
     }
 
     /**
@@ -76,7 +92,8 @@ public final class KsgBbModelLoader implements ModelLoader<String, ResourceLocat
                                           MaterialSet materialSet) {
         List<Vertex> vertices = new ArrayList<>();
         List<Mesh> meshes = new ArrayList<>();
-        Bone root = new Bone("root", new Transform(), null);
+        var components = lib.kasuga.rendering.models.mc.component.ModelComponents.parse(definition.components());
+        Bone root = new Bone(components.isEmpty() ? "root" : components.rootName(), new Transform(), null);
         List<Bone> bones = new ArrayList<>();
         bones.add(root);
 
@@ -92,15 +109,17 @@ public final class KsgBbModelLoader implements ModelLoader<String, ResourceLocat
             // Pass 2: walk the outliner building bones + binding vertices to their nearest named ancestor.
             for (BbModelDefinition.OutlineNode node : definition.outliner()) {
                 appendOutline(node, BlockBenchTransform.IDENTITY, true, definition, materials, pivots,
-                        root, ZERO_PX, bones, vertices, meshes);
+                        root, ZERO_PX, null, bones, vertices, meshes);
             }
             wireChildren(bones);
         }
 
         Skeleton skeleton = new Skeleton(bones.toArray(new Bone[0]), root, new lib.kasuga.rendering.models.uml.structure.skeleton.Anchor[0], null, new Transform());
+        components.apply(skeleton);
         Model model = new Model(
                 vertices.toArray(new Vertex[0]), meshes.toArray(new Mesh[0]), bones.toArray(new Bone[0]), skeleton,
-                materialSet, MeshMode.QUADS, null, null
+                materialSet, MeshMode.QUADS,
+                components.isEmpty() ? null : new lib.kasuga.rendering.models.mc.component.ModelComponentsData(components), null
         );
         for (int index = 0; index < definition.animations().size(); index++) {
             BbModelAnimation animation = definition.animations().get(index);
@@ -170,9 +189,11 @@ public final class KsgBbModelLoader implements ModelLoader<String, ResourceLocat
         Map<Integer, Material> result = new HashMap<>();
         for (BbModelDefinition.Texture texture : definition.textures()) {
             int textureReference = textureReference(texture);
-            MCTexture modelTexture = createTexture(identifier, texture, definition);
+            BufferedImage image = textureImage(identifier, texture);
+            MCTexture modelTexture = createTexture(identifier, texture, definition, image);
             materialSetBuilder.registerTexture(textureReference, modelTexture)
                     .useTexture(textureReference)
+                    .setMaterialData(BbModelMaterialData.from(image))
                     .addSpriteBuildingFunc((builder, sprites, material) -> sprites.textureId(textureReference).endSprite())
                     .endMaterial(textureReference);
             result.put(textureReference, materialSetBuilder.getNamedMaterial(textureReference));
@@ -186,13 +207,12 @@ public final class KsgBbModelLoader implements ModelLoader<String, ResourceLocat
     }
 
     private MCTexture createTexture(ResourceLocation modelIdentifier, BbModelDefinition.Texture texture,
-                                    BbModelDefinition definition) {
+                                    BbModelDefinition definition, @Nullable BufferedImage image) {
         KasugaTextureManager textureManager = Constants.TEXTURE_BASIC;
         Object sourceIdentifier;
         ResourceLocation textureIdentifier;
         int[] canvas = uvCanvas(texture, definition);
         if (texture.source().startsWith("data:image/")) {
-            BufferedImage image = decodeImage(texture.source(), modelIdentifier);
             textureIdentifier = embeddedTextureLocation(modelIdentifier, texture.index());
             sourceIdentifier = Pair.of(textureIdentifier, image);
         } else {
@@ -206,6 +226,27 @@ public final class KsgBbModelLoader implements ModelLoader<String, ResourceLocat
         // decoded image size, which only supplies the sprite content.
         return new MCTexture(texture.id(), () -> material, canvas[0], canvas[1],
                 new MCTextureData(sourceIdentifier, textureManager, true));
+    }
+
+    private static @Nullable BufferedImage textureImage(
+            ResourceLocation modelIdentifier,
+            BbModelDefinition.Texture texture
+    ) {
+        if (texture.source().startsWith("data:image/")) {
+            return decodeImage(texture.source(), modelIdentifier);
+        }
+        ResourceLocation sprite = resolveTextureLocation(modelIdentifier, texture.source(), texture.name());
+        ResourceLocation imageLocation = ResourceLocation.fromNamespaceAndPath(
+                sprite.getNamespace(), "textures/" + sprite.getPath() + ".png");
+        var stream = IdentifierHelper.getInputStream(imageLocation);
+        if (stream.isEmpty()) {
+            return null;
+        }
+        try (InputStream input = stream.get()) {
+            return ImageIO.read(input);
+        } catch (IOException exception) {
+            return null;
+        }
     }
 
     /**
@@ -229,7 +270,8 @@ public final class KsgBbModelLoader implements ModelLoader<String, ResourceLocat
      */
     private static void appendOutline(BbModelDefinition.OutlineNode node, BlockBenchTransform parentTransform, boolean parentVisible,
                                BbModelDefinition definition, Map<Integer, Material> materials,
-                               Map<BbModelDefinition.GroupNode, Vector3f> pivots, Bone bindTarget, Vector3f parentBonePivotPx,
+                               Map<BbModelDefinition.GroupNode, Vector3f> pivots, Bone bindTarget,
+                               Vector3f parentBonePivotPx, @Nullable BlockBenchTransform parentBoneTransform,
                                List<Bone> bones, List<Vertex> vertices, List<Mesh> meshes) {
         if (node instanceof BbModelDefinition.ElementNode elementNode) {
             BbModelDefinition.Element element = definition.elements().get(elementNode.elementId());
@@ -247,18 +289,26 @@ public final class KsgBbModelLoader implements ModelLoader<String, ResourceLocat
         BlockBenchTransform transform = parentTransform.child(rawOrigin, group.rotation());
         Bone nextBind = bindTarget;
         Vector3f nextParentPivotPx = parentBonePivotPx;
+        BlockBenchTransform nextParentBoneTransform = parentBoneTransform;
         if (!group.name().isEmpty()) {
             Vector3f pivotPx = pivots.get(group);
-            Vector3f offset = new Vector3f(pivotPx).sub(parentBonePivotPx).mul(1.0f / 16.0f);
-            Bone bone = new Bone(group.name(), new Transform().translate(offset.x, offset.y, offset.z), null);
+            // Geometry follows the raw group origin, while a missing origin uses a derived
+            // subtree pivot for the bone. Rebuild the bone-space transform from that resolved pivot.
+            BlockBenchTransform boneWorld = parentTransform.child(pivotPx, group.rotation());
+            Transform groupTransform = boneWorld.asTransform();
+            Transform bindTransform = parentBoneTransform == null
+                    ? groupTransform
+                    : parentBoneTransform.asTransform().invert().mul(groupTransform);
+            Bone bone = new Bone(group.name(), bindTransform, null);
             bone.setParent(bindTarget);
             bones.add(bone);
             nextBind = bone;
             nextParentPivotPx = pivotPx;
+            nextParentBoneTransform = boneWorld;
         }
         for (BbModelDefinition.OutlineNode child : group.children()) {
             appendOutline(child, transform, parentVisible && group.visible(), definition, materials, pivots,
-                    nextBind, nextParentPivotPx, bones, vertices, meshes);
+                    nextBind, nextParentPivotPx, nextParentBoneTransform, bones, vertices, meshes);
         }
     }
 
@@ -266,8 +316,13 @@ public final class KsgBbModelLoader implements ModelLoader<String, ResourceLocat
                                BbModelDefinition definition, Map<Integer, Material> materials, Bone bindTarget,
                                List<Vertex> vertices, List<Mesh> meshes) {
         if (!parentVisible || !element.visible()) return;
-        BlockBenchTransform transform = parentTransform.child(element.origin(), element.rotation());
-        if ("mesh".equals(element.type())) {
+        boolean mesh = "mesh".equals(element.type());
+        // Blockbench 5.2.2 assigns Format.euler_order (ZYX) to groups and cubes, while its Mesh preview
+        // leaves three.js' default XYZ order in place. Preserve that distinction in the baked geometry.
+        BlockBenchTransform transform = mesh
+                ? parentTransform.child(element.origin(), QuaternionHelper.fromXYZDegrees(element.rotation()))
+                : parentTransform.child(element.origin(), element.rotation());
+        if (mesh) {
             appendMeshElement(element, transform, definition, materials, bindTarget, vertices, meshes);
         } else {
             appendCubeElement(element, transform, definition, materials, bindTarget, vertices, meshes);
@@ -394,16 +449,25 @@ public final class KsgBbModelLoader implements ModelLoader<String, ResourceLocat
         );
 
         private BlockBenchTransform child(Vector3f pivot, Vector3f localRotation) {
+            return child(pivot, QuaternionHelper.fromZYXDegrees(localRotation));
+        }
+
+        private BlockBenchTransform child(Vector3f pivot, Quaternionf localRotation) {
             Vector3f scaledPivot = new Vector3f(pivot).mul(1.0f / 16.0f);
-            Vector3f origin = scaledPivot.sub(parentPivot).rotate(rotation).add(absoluteOrigin);
-            // Blockbench composes Z→Y→X (see QuaternionHelper.fromZYXAngle): a group's or element's own
-            // rotation is applied in its parent's already-rotated frame, around its own origin.
-            Quaternionf combinedRotation = new Quaternionf(rotation).mul(QuaternionHelper.fromZYXDegrees(localRotation));
+            // JOML subtraction/rotation are in-place. Compute from a copy so parentPivot retains
+            // this node's unmodified absolute pivot for the next nested group.
+            Vector3f origin = new Vector3f(scaledPivot).sub(parentPivot).rotate(rotation).add(absoluteOrigin);
+            // A node's rotation is applied in its parent's already-rotated frame, around its own origin.
+            Quaternionf combinedRotation = new Quaternionf(rotation).mul(localRotation);
             return new BlockBenchTransform(combinedRotation, origin, scaledPivot);
         }
 
         private Vector3f apply(Vector3f localPosition) {
             return new Vector3f(localPosition).rotate(rotation).add(absoluteOrigin);
+        }
+
+        private Transform asTransform() {
+            return new Transform().translate(absoluteOrigin).mul(rotation);
         }
     }
 
@@ -463,7 +527,7 @@ public final class KsgBbModelLoader implements ModelLoader<String, ResourceLocat
         return ResourceLocation.fromNamespaceAndPath(model.getNamespace(), "bbmodel/" + path + "_" + index);
     }
 
-    private static BufferedImage decodeImage(String source, ResourceLocation model) {
+    static BufferedImage decodeImage(String source, ResourceLocation model) {
         int separator = source.indexOf(',');
         if (separator < 0) throw new IllegalArgumentException("Invalid embedded texture in " + model);
         try {

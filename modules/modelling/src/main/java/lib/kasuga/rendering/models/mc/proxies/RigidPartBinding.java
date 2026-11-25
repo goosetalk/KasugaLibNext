@@ -12,6 +12,9 @@ import lib.kasuga.rendering.models.uml.dynamic.animation.scope.TargetPublication
 import lib.kasuga.rendering.models.uml.dynamic.fsm.StateMachine;
 import lib.kasuga.rendering.models.uml.math.Transform;
 import org.jetbrains.annotations.Nullable;
+import org.joml.Vector3d;
+import org.joml.Vector3dc;
+import org.joml.Vector3f;
 
 import java.util.Objects;
 import java.util.function.Supplier;
@@ -31,7 +34,8 @@ final class RigidPartBinding
     private final PartMotionSampler sampler;
     private final Supplier<@Nullable StateMachine<?>> machine;
     private final ModelGroupFrameState frameState;
-    private final Transform local;
+    private volatile Transform local;
+    private final Vector3f worldLightOffset;
 
     @Nullable
     private volatile ModelInstance instance;
@@ -39,17 +43,46 @@ final class RigidPartBinding
     private volatile TargetPublication<RigidPartOutput> publication;
     @Nullable
     private volatile AnimationRenderPort renderPort;
+    @Nullable
+    private volatile Vector3d worldLightPosition;
     private volatile boolean closed;
+
+    RigidPartBinding(int index, String partId, PartMotionSampler sampler,
+                     Supplier<@Nullable StateMachine<?>> machine,
+                     ModelGroupFrameState frameState, Transform local,
+                     Vector3f worldLightOffset) {
+        this.ref = AnimationTargetRef.partRoot(partId);
+        this.index = index;
+        this.sampler = Objects.requireNonNull(sampler, "sampler");
+        this.machine = Objects.requireNonNull(machine, "machine");
+        this.frameState = Objects.requireNonNull(frameState, "frameState");
+        this.local = Objects.requireNonNull(local, "local").copy();
+        this.worldLightOffset = new Vector3f(Objects.requireNonNull(worldLightOffset, "worldLightOffset"));
+        if (!this.worldLightOffset.isFinite()) {
+            throw new IllegalArgumentException("worldLightOffset must be finite");
+        }
+    }
 
     RigidPartBinding(int index, PartMotionSampler sampler,
                      Supplier<@Nullable StateMachine<?>> machine,
-                     ModelGroupFrameState frameState, Transform local) {
+                     ModelGroupFrameState frameState, Transform local,
+                     Vector3f worldLightOffset) {
         this.ref = AnimationTargetRef.part(index);
         this.index = index;
         this.sampler = Objects.requireNonNull(sampler, "sampler");
         this.machine = Objects.requireNonNull(machine, "machine");
         this.frameState = Objects.requireNonNull(frameState, "frameState");
         this.local = Objects.requireNonNull(local, "local").copy();
+        this.worldLightOffset = new Vector3f(Objects.requireNonNull(worldLightOffset, "worldLightOffset"));
+        if (!this.worldLightOffset.isFinite()) {
+            throw new IllegalArgumentException("worldLightOffset must be finite");
+        }
+    }
+
+    RigidPartBinding(int index, PartMotionSampler sampler,
+                     Supplier<@Nullable StateMachine<?>> machine,
+                     ModelGroupFrameState frameState, Transform local) {
+        this(index, sampler, machine, frameState, local, new Vector3f());
     }
 
     @Override
@@ -101,6 +134,14 @@ final class RigidPartBinding
         return index;
     }
 
+    void setLocal(Transform local) {
+        this.local = Objects.requireNonNull(local, "local").copy();
+    }
+
+    Transform local() {
+        return local.copy();
+    }
+
     @Override
     public @Nullable ModelInstance owner() {
         return instance;
@@ -145,12 +186,13 @@ final class RigidPartBinding
         if (frame == null) {
             return;
         }
-        Transform placement = frame.root().at(partialTick).mul(local);
-        Transform localMotion = frame.motion(index).sample(partialTick);
-        if (localMotion != null) {
-            placement.mul(localMotion);
-        }
-        model.getSkeletonInstance().transformRootWorld(placement);
+        writeRoot(model, frame.root().at(partialTick), frame.motion(index).sample(partialTick));
+    }
+
+    @Override
+    public @Nullable Vector3dc worldLightPosition() {
+        Vector3d current = worldLightPosition;
+        return current == null ? null : new Vector3d(current);
     }
 
     private void sampleOutput(
@@ -170,17 +212,23 @@ final class RigidPartBinding
                 .value(ModelGroupRenderPort.FRAME_INPUT)
                 .orElse(null);
         if (frame != null) {
-            Transform placement = frame.root().at(1f).mul(local);
             Transform frameMotion = frame.motion(index).sample(
                     (float) context.interpolationAlpha());
-            if (frameMotion != null) {
-                placement.mul(frameMotion);
-            }
-            model.getSkeletonInstance().transformRootWorld(placement);
+            writeRoot(model, frame.root().at(1f), frameMotion);
             return;
         }
-        Transform placement = active.currentOutput().sample(context.interpolationAlpha());
+        RigidPartOutput output = active.currentOutput();
+        writeRoot(model, output.root().at((float) context.interpolationAlpha()),
+                output.motion().sample((float) context.interpolationAlpha()));
+    }
+
+    private void writeRoot(ModelInstance model, Transform groupRoot, @Nullable Transform localMotion) {
+        Transform placement = groupRoot.copy().mul(local);
+        if (localMotion != null) {
+            placement.mul(localMotion);
+        }
         model.getSkeletonInstance().transformRootWorld(placement);
+        worldLightPosition = new Vector3d(groupRoot.apply(new Vector3f(worldLightOffset)));
     }
 
     @Override
@@ -212,5 +260,6 @@ final class RigidPartBinding
             current.setRootTransformDriver(null);
             current.setAnimationRenderPort(null);
         }
+        worldLightPosition = null;
     }
 }

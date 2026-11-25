@@ -13,6 +13,8 @@ import lib.kasuga.rendering.models.mc.backend.vbuffer.IrisVertexBuffer;
 import lib.kasuga.rendering.models.mc.backend.vbuffer.VanillaVertexBuffer;
 import lib.kasuga.rendering.models.mc.compat.iris.IrisCompat;
 import lib.kasuga.rendering.models.uml.dynamic.ModelInstance;
+import lib.kasuga.rendering.models.uml.backend.DepthBias;
+import lib.kasuga.rendering.models.uml.backend.gpu.PolygonOffsetScope;
 import lombok.Getter;
 import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.RenderType;
@@ -24,6 +26,7 @@ import org.joml.Matrix4f;
 
 import java.util.EnumMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 
 /** GPU resources for one model, split into independently stateful alpha passes. */
@@ -46,16 +49,26 @@ public class BackendInstance implements AutoCloseable {
     private final BoneTransformTBO tbo;
     private final Matrix4f matrixCache = new Matrix4f();
     private Object renderFrameToken;
+    @Nullable
+    private ModelLighting lighting;
+
+    void setLighting(ModelLighting lighting) {
+        this.lighting = Objects.requireNonNull(lighting, "lighting");
+    }
+
+    ModelLighting lighting() {
+        return lighting != null ? lighting : ModelLighting.world(model.getLightingMode(), null);
+    }
 
     void renderInFrame(Object token) { renderFrameToken = token; }
 
-    private void updateData(FlatModelData data) {
+    private void updateData(FlatModelData data, boolean updatePackedLighting) {
         if (renderFrameToken == null) {
             if (model.checkForUpdate()) model.update();
         } else {
             model.prepareRenderFrame(renderFrameToken);
         }
-        data.updateModel(false);
+        data.updateModel(false, updatePackedLighting);
         if (tbo != null) tbo.updateForVersion();
     }
 
@@ -69,6 +82,13 @@ public class BackendInstance implements AutoCloseable {
         this.executor = executor;
         this.cpuSkinning = cpuSkinning;
         this.nativeOnly = nativeOnly;
+
+        // Direct factory/preview callers may bypass Backend.add. A transform-only rig must
+        // never allocate even a bone TBO, regardless of the route used to construct this object.
+        if (!instance.getModel().isRenderable()) {
+            this.tbo = null;
+            return;
+        }
 
         Map<VertexFormatElement, Integer> bufOffsets =
                 FlatModelData.genVertexFormat(RenderState.UML_VERTEX_FORMAT);
@@ -130,10 +150,10 @@ public class BackendInstance implements AutoCloseable {
         }
     }
 
-    boolean prepareForGlobalBatch(ModelRenderPass pass) {
+    boolean prepareForGlobalBatch(ModelRenderPass pass, boolean updatePackedLighting) {
         RenderPart part = parts.get(pass);
         if (part == null) return false;
-        updateData(part.data);
+        updateData(part.data, updatePackedLighting);
         part.lastUsedBuffer = null;
         return true;
     }
@@ -175,7 +195,7 @@ public class BackendInstance implements AutoCloseable {
         GLContext context = part.getContext();
         IVertexBuffer buffer = part.getBuffer();
         if (context == null || buffer == null) return false;
-        updateData(part.data);
+        updateData(part.data, true);
         buffer.updateGpuBuffer(part.data.getDirtyVertices(), part.lastUsedBuffer != buffer);
         part.lastUsedBuffer = buffer;
         part.data.getDirtyVertices().clear();
@@ -186,6 +206,14 @@ public class BackendInstance implements AutoCloseable {
     void drawPreparedBuffer(ModelRenderPass pass, PoseStack.Pose pose, RenderType renderType,
                             Matrix4f modelViewMatrix, Matrix4f projectionMatrix,
                             float emissiveStrength, float ambientLightEnhancement, int oitMode) {
+        drawPreparedBuffer(pass, pose, renderType, modelViewMatrix, projectionMatrix,
+                emissiveStrength, ambientLightEnhancement, oitMode, model.getDepthBias());
+    }
+
+    void drawPreparedBuffer(ModelRenderPass pass, PoseStack.Pose pose, RenderType renderType,
+                            Matrix4f modelViewMatrix, Matrix4f projectionMatrix,
+                            float emissiveStrength, float ambientLightEnhancement, int oitMode,
+                            DepthBias depthBias) {
         RenderPart part = parts.get(pass);
         if (part == null) return;
 
@@ -210,7 +238,11 @@ public class BackendInstance implements AutoCloseable {
             // Every context's enter() sets default/custom uniforms, applies
             // the shader and binds the VAO (including Iris' skinned attributes).
             // Reapplying here repeats that work and can undo the OIT rebind.
-            try { buffer.getVertexBuffer().draw(); }
+            // Apply after shader setup (including Iris overrides), then restore before
+            // clearRenderState. Every replay of prepared transparency uses the same policy.
+            try (var ignored = PolygonOffsetScope.apply(depthBias)) {
+                buffer.getVertexBuffer().draw();
+            }
             finally {
                 buffer.markSubmitted();
                 if (tbo != null) tbo.markSubmitted();
@@ -260,7 +292,8 @@ public class BackendInstance implements AutoCloseable {
         kasugaShader.setCurrentPose(pose);
         kasugaShader.setEmissiveStrength(emissiveStrength);
         kasugaShader.setAmbientLightEnhancement(ambientLightEnhancement);
-        kasugaShader.setLightData(data.getBrightness(), data.getLightmap(), data.getOverlay());
+        kasugaShader.setLighting(lighting());
+        kasugaShader.setLightData(data.getLightmap(), data.getOverlay());
         kasugaShader.setAlphaMode(pass.shaderAlphaMode());
         kasugaShader.setOitMode(oitMode);
         kasugaShader.setGpuSkinningState(!cpuSkinning, tbo != null ? tbo.getTextureId() : 0);

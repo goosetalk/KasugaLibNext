@@ -68,11 +68,15 @@ public final class StandaloneRenderHarness {
             System.out.println("Standalone GL: " + report.get("renderer") + " / " + report.get("glVersion"));
             var suite = new RenderRegressionSuite(options.report.getParent());
             run(results, "world-ui-canvas", WorldUiCanvasRegression::run);
+            run(results, "world-space-lights", () -> WorldLightRegression.run(options.report.getParent()));
             run(results, "depth-precision", suite::depthPrecision);
             run(results, "depth-handoff", suite::depthHandoff);
+            run(results, "model-depth-bias-pixels", PolygonOffsetRegression::pixels);
+            run(results, "polygon-offset-state", PolygonOffsetRegression::state);
             run(results, "conditional-peel-loop", suite::conditionalPeel);
             run(results, "production-program-links", suite::productionPrograms);
             run(results, "production-alpha-passes", suite::alphaPasses);
+            run(results, "vanilla-block-lighting", VanillaBlockLightingRegression::run);
             run(results, "target-resize-and-failure", suite::targetLifecycle);
             run(results, "gpu-buffer-lifecycle", GpuBufferLifecycleRegression::run);
             run(results, "mrt-depth-texture", NebulaGpuResourceRegression::mrtDepthTexture);

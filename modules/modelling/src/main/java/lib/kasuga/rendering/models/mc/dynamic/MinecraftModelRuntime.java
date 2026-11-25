@@ -3,6 +3,7 @@ package lib.kasuga.rendering.models.mc.dynamic;
 import lib.kasuga.rendering.models.mc.dynamic.physics.MinecraftRagdollDeployments;
 import lib.kasuga.rendering.models.mc.dynamic.physics.MinecraftRagdollDragger;
 import lib.kasuga.rendering.models.uml.dynamic.ModelInstance;
+import lib.kasuga.rendering.models.uml.dynamic.DummyModelInstance;
 import lib.kasuga.rendering.models.uml.dynamic.physics.ModelPhysicsScene;
 import lib.kasuga.rendering.models.uml.dynamic.physics.SkeletonRagdoll;
 import net.minecraft.client.Minecraft;
@@ -35,11 +36,17 @@ public final class MinecraftModelRuntime {
     public static synchronized void register(ModelInstance instance) {
         Objects.requireNonNull(instance, "instance");
         if (instance.isClosed()) INSTANCES.remove(instance);
-        else INSTANCES.put(instance, Boolean.TRUE);
+        else {
+            INSTANCES.put(instance, Boolean.TRUE);
+            ModelParticleRuntime.register(instance);
+            ModelLightRuntime.register(instance);
+        }
     }
 
     public static synchronized void unregister(ModelInstance instance) {
         INSTANCES.remove(instance);
+        ModelParticleRuntime.unregister(instance);
+        ModelLightRuntime.unregister(instance);
     }
 
     public static synchronized void register(ModelPhysicsScene scene) {
@@ -113,6 +120,15 @@ public final class MinecraftModelRuntime {
         List<ModelInstance> instances = instanceSnapshot();
         Set<ModelPhysicsScene> evaluatedScenes = identitySet();
         Set<SkeletonRagdoll> evaluatedRelaxations = identitySet();
+        Set<ModelInstance> evaluatedGroups = identitySet();
+
+        // Transform groups have no draw call to advance them. Finish their ancestor chains
+        // before any ordinary model/physics scene consumes the attached roots this frame.
+        for (ModelInstance instance : instances) {
+            if (instance instanceof DummyModelInstance group) {
+                evaluateGroup(group, partialTick, deltaSeconds, evaluatedGroups, evaluatedScenes, evaluatedRelaxations);
+            }
+        }
 
         // Scenes first: a later standalone callback must not sample over their completed pose.
         // Re-read membership each frame instead of retaining a scene across migrations.
@@ -121,6 +137,7 @@ public final class MinecraftModelRuntime {
         }
         for (ModelInstance instance : instances) {
             if (!directlyRegistered(instance)) continue;
+            if (evaluatedGroups.contains(instance)) continue;
             SkeletonRagdoll relaxation = instance.getSkeletonInstance().getRelaxation();
             if (relaxation != null && evaluatedRelaxations.contains(relaxation)) continue;
             ModelPhysicsScene scene = activeScene(instance);
@@ -130,6 +147,22 @@ public final class MinecraftModelRuntime {
                 instance.evaluateFrame(partialTick, deltaSeconds);
             }
         }
+    }
+
+    private static void evaluateGroup(DummyModelInstance group, float partialTick, float deltaSeconds,
+                                      Set<ModelInstance> evaluatedGroups,
+                                      Set<ModelPhysicsScene> evaluatedScenes,
+                                      Set<SkeletonRagdoll> evaluatedRelaxations) {
+        if (!directlyRegistered(group) || !evaluatedGroups.add(group)) return;
+        DummyModelInstance parent = DummyModelInstance.parentOf(group);
+        if (parent != null) evaluateGroup(parent, partialTick, deltaSeconds,
+                evaluatedGroups, evaluatedScenes, evaluatedRelaxations);
+        if (!directlyRegistered(group)) return;
+        SkeletonRagdoll relaxation = group.getSkeletonInstance().getRelaxation();
+        if (relaxation != null && evaluatedRelaxations.contains(relaxation)) return;
+        ModelPhysicsScene scene = activeScene(group);
+        if (scene != null) evaluateScene(scene, partialTick, deltaSeconds, evaluatedScenes, evaluatedRelaxations);
+        else group.evaluateFrame(partialTick, deltaSeconds);
     }
 
     private static void evaluateScene(ModelPhysicsScene scene, float partialTick, float deltaSeconds,
@@ -185,8 +218,11 @@ public final class MinecraftModelRuntime {
     public static void onClientLevelChanged(ClientTickEvent.Post event) {
         ClientLevel level = Minecraft.getInstance().level;
         if (level == previousLevel) return;
+        boolean hadLevel = previousLevel != null;
         previousLevel = level;
         MinecraftRagdollDragger.releaseActiveDrag();
         MinecraftRagdollDeployments.removeAll();
+        if (hadLevel || level == null) ModelParticleRuntime.clearWorldState();
+        if (hadLevel || level == null) ModelLightRuntime.clearWorldState();
     }
 }

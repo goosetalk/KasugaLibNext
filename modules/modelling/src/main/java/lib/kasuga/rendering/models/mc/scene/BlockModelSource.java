@@ -17,6 +17,7 @@ import org.jetbrains.annotations.Nullable;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.blaze3d.vertex.PoseStack;
 
@@ -27,6 +28,7 @@ public class BlockModelSource extends LayeredModelSource {
     protected final Map<BlockPos, BlockEntity> blockEntities = new LinkedHashMap<>();
     protected final PreviewLevel level;
     private final BlockPos origin;
+    private final Optional<BlockDimensions> dimensions;
     private final Map<SliceKey,CachedBlockGeometry> geometry = new java.util.HashMap<>();
     private final Map<SliceKey,List<Element>> entitySlices = new java.util.HashMap<>();
     private long bakedGeneration = -1;
@@ -42,8 +44,17 @@ public class BlockModelSource extends LayeredModelSource {
         this(host, infos, BlockPos.ZERO);
     }
 
+    /** Geometry-only sources skip private block entities and their renderers. */
+    public BlockModelSource(Level host, List<StructureBlockInfo> infos, boolean includeBlockEntities) {
+        this(host, infos, BlockPos.ZERO, includeBlockEntities);
+    }
+
     /** Keeps world-based block-entity references intact while rendering geometry close to zero. */
     public BlockModelSource(Level host, List<StructureBlockInfo> infos, BlockPos origin) {
+        this(host, infos, origin, true);
+    }
+
+    private BlockModelSource(Level host, List<StructureBlockInfo> infos, BlockPos origin, boolean includeBlockEntities) {
         this.origin = origin.immutable();
         if (infos.size() > MinecraftModelSources.MAX_BLOCKS) throw new IllegalArgumentException("Too many structure blocks");
         var states = new LinkedHashMap<BlockPos, BlockState>();
@@ -57,7 +68,9 @@ public class BlockModelSource extends LayeredModelSource {
         elements = blocks.keySet().stream().map(p -> p.subtract(origin)).map(p -> new Element(p.getX(), p.getY(), p.getZ(),
                 new ModelBounds(p.getX(), p.getY(), p.getZ(), (double) p.getX() + 1, (double) p.getY() + 1, (double) p.getZ() + 1))).toList();
         validateSpan(elements);
+        dimensions = BlockDimensions.fromBlocks(blocks.keySet());
         level = new PreviewLevel(host, blocks);
+        if (!includeBlockEntities) return;
         try {
             for (var info : infos) if (blocks.containsKey(info.pos()) && info.state().getBlock() instanceof EntityBlock factory) {
                 BlockEntity entity = factory.newBlockEntity(info.pos(), info.state());
@@ -69,6 +82,9 @@ public class BlockModelSource extends LayeredModelSource {
             }
         } catch (RuntimeException | Error failure) { close(); throw failure; }
     }
+
+    /** Tight non-air block extents; returns empty when the source contains no blocks. */
+    public Optional<BlockDimensions> dimensions() { return dimensions; }
 
     private static void validateSpan(List<Element> elements) {
         if (elements.isEmpty()) return;

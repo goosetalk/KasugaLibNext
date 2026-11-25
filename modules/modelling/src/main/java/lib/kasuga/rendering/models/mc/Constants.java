@@ -94,18 +94,20 @@ public class Constants {
                 ResourceLocation.fromNamespaceAndPath(KasugaLib.MODID, "builtin_rendering")
         );
         BillboardEffects.initialize(pipelines);
+        lib.kasuga.rendering.models.mc.dynamic.ModelParticleRuntime.initialize(pipelines);
         BlackHoleEffects.initialize(pipelines);
         lib.kasuga.rendering.effect.builtin.cloud.CloudEffects.initialize(pipelines);
         lib.kasuga.rendering.effect.builtin.water.WaterEffects.initialize(pipelines);
+        lib.kasuga.rendering.effect.builtin.light.WorldLights.initialize(pipelines);
         lib.kasuga.scene.SceneProps.initialize(pipelines);
         RenderPipelineDescriptor opaque = RenderPipelineDescriptor.builder(
                         ResourceLocation.fromNamespaceAndPath(KasugaLib.MODID, "models_opaque"),
-                        RenderPhase.AFTER_ENTITIES)
+                        RenderPhase.AFTER_BLOCK_ENTITIES)
                 .priority(0)
                 .build();
         RenderPipelineDescriptor mask = RenderPipelineDescriptor.builder(
                         ResourceLocation.fromNamespaceAndPath(KasugaLib.MODID, "models_mask"),
-                        RenderPhase.AFTER_ENTITIES)
+                        RenderPhase.AFTER_BLOCK_ENTITIES)
                 .priority(1)
                 .build();
         RenderPipelineDescriptor translucent = RenderPipelineDescriptor.builder(
@@ -126,6 +128,8 @@ public class Constants {
     @SubscribeEvent
     @SuppressWarnings("unchecked")
     public static void onReloadListenerRegister(RegisterClientReloadListenersEvent event) {
+        event.registerReloadListener((net.minecraft.server.packs.resources.ResourceManagerReloadListener) resources ->
+                lib.kasuga.rendering.models.mc.dynamic.ModelParticleRuntime.invalidateTextures());
         IrisCompat.onStart();
         TEXTURE_TYPE = new SourceType("texture");
         MODEL_TYPE = new SourceType("model");
@@ -276,7 +280,7 @@ public class Constants {
                         .setCullState(RenderStateShard.CULL)
                         .setLightmapState(RenderStateShard.LIGHTMAP)
                         .setOverlayState(RenderStateShard.OVERLAY)
-                        .setLayeringState(RenderStateShard.VIEW_OFFSET_Z_LAYERING)
+                        .setLayeringState(RenderStateShard.NO_LAYERING)
                         .setOutputState(RenderStateShard.MAIN_TARGET)
                         .setTexturingState(RenderStateShard.DEFAULT_TEXTURING)
                         .setWriteMaskState(translucent
@@ -302,7 +306,7 @@ public class Constants {
                         .setCullState(RenderStateShard.CULL)
                         .setLightmapState(RenderStateShard.LIGHTMAP)
                         .setOverlayState(RenderStateShard.OVERLAY)
-                        .setLayeringState(RenderStateShard.VIEW_OFFSET_Z_LAYERING)
+                        .setLayeringState(RenderStateShard.NO_LAYERING)
                         .setOutputState(RenderStateShard.MAIN_TARGET)
                         .setTexturingState(RenderStateShard.DEFAULT_TEXTURING)
                         .setWriteMaskState(translucent
@@ -325,7 +329,7 @@ public class Constants {
                         .setCullState(RenderStateShard.CULL)
                         .setLightmapState(RenderStateShard.LIGHTMAP)
                         .setOverlayState(RenderStateShard.OVERLAY)
-                        .setLayeringState(RenderStateShard.VIEW_OFFSET_Z_LAYERING)
+                        .setLayeringState(RenderStateShard.NO_LAYERING)
                         .setOutputState(RenderState.OIT_TARGET)
                         .setTexturingState(RenderStateShard.DEFAULT_TEXTURING)
                         // The copied scene depth is read-only for both OIT
@@ -348,7 +352,7 @@ public class Constants {
                         .setCullState(RenderStateShard.CULL)
                         .setLightmapState(RenderStateShard.LIGHTMAP)
                         .setOverlayState(RenderStateShard.OVERLAY)
-                        .setLayeringState(RenderStateShard.VIEW_OFFSET_Z_LAYERING)
+                        .setLayeringState(RenderStateShard.NO_LAYERING)
                         .setOutputState(RenderState.OIT_TARGET)
                         .setTexturingState(RenderStateShard.DEFAULT_TEXTURING)
                         .setWriteMaskState(RenderStateShard.COLOR_WRITE)

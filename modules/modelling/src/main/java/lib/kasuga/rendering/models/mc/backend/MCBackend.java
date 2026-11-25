@@ -9,6 +9,7 @@ import lib.kasuga.rendering.models.mc.compat.iris.IrisCompat;
 import lib.kasuga.rendering.models.mc.util.RotHelper;
 import lib.kasuga.rendering.models.uml.backend.Backend;
 import lib.kasuga.rendering.models.uml.backend.BackendContext;
+import lib.kasuga.rendering.models.uml.backend.DepthBias;
 import lib.kasuga.rendering.models.uml.bridge.Bridge;
 import lib.kasuga.rendering.models.uml.dynamic.ModelInstance;
 import lib.kasuga.rendering.models.uml.dynamic.animation.scope.FrameInputSnapshot;
@@ -83,6 +84,14 @@ public class MCBackend extends Backend<MCBridge, BackendInstance, MCBackendConte
     }
 
     @Override
+    public void add(Object key, MCBridge bridge, ModelInstance instance) {
+        super.add(key, bridge, instance);
+        if (lib.kasuga.rendering.models.mc.dynamic.ModelParticleRuntime.module(instance) != null
+                || lib.kasuga.rendering.models.mc.dynamic.ModelLightRuntime.module(instance) != null)
+            lib.kasuga.rendering.models.mc.dynamic.MinecraftModelRuntime.register(instance);
+    }
+
+    @Override
     public void render(BackendContext<MCBridge, BackendInstance, MCBackendContext, BackendTransform> renderable, MCBackendContext context) {
         render(renderable, context, ModelRenderPass.OPAQUE);
     }
@@ -106,20 +115,13 @@ public class MCBackend extends Backend<MCBridge, BackendInstance, MCBackendConte
         // schedule mode → view distance → frustum. Culled instances neither
         // sample animation nor touch GPU buffers this frame.
         ModelInstance model = renderable.getModelInstance();
+        if (model.isClosed()) return;
         BackendTransform transform = renderable.beforeRender(context);
         if (!passesSchedule(model, transform, context)) return;
 
         PoseStack poseStack = context.getPoseStack();
         poseStack.pushPose();
         try {
-            Vec3 cameraPosition = context.getCamera() == null ? Vec3.ZERO : context.getCamera().getPosition();
-            var worldOrigin = model.getSkeletonInstance().getWorldOrigin();
-            // Compose camera-relative translation in double before it enters the
-            // float pose matrix. Origin-local skeletons therefore never subtract
-            // two huge float values during rendering.
-            Vector3f cameraRelativeOrigin = cameraRelativeOrigin(worldOrigin, cameraPosition);
-            poseStack.translate(cameraRelativeOrigin.x, cameraRelativeOrigin.y, cameraRelativeOrigin.z);
-
             // Animation is sampled once per rendered frame. Configured ragdoll
             // physics is advanced by MinecraftRagdollRuntime independently of
             // render visibility; tying it to this method froze culled instances.
@@ -130,6 +132,18 @@ public class MCBackend extends Backend<MCBridge, BackendInstance, MCBackendConte
                         FrameInputSnapshot.empty()));
             }
 
+            // The scheduling transform describes the previous render sample. Re-read
+            // the root after animation so camera rebasing and lighting use this frame's
+            // world position rather than a one-frame-old value.
+            transform = renderable.beforeRender(context);
+            Vec3 cameraPosition = context.getCamera() == null ? Vec3.ZERO : context.getCamera().getPosition();
+            var worldOrigin = model.getSkeletonInstance().getWorldOrigin();
+            // Compose camera-relative translation in double before it enters the
+            // float pose matrix. Origin-local skeletons therefore never subtract
+            // two huge float values during rendering.
+            Vector3f cameraRelativeOrigin = cameraRelativeOrigin(worldOrigin, cameraPosition);
+            poseStack.translate(cameraRelativeOrigin.x, cameraRelativeOrigin.y, cameraRelativeOrigin.z);
+
             LightData lightData;
             int overlay;
             float emissive;
@@ -137,7 +151,7 @@ public class MCBackend extends Backend<MCBridge, BackendInstance, MCBackendConte
                 if (transform.isAppliesTransform()) {
                     transform.applyTransform(poseStack);
                 }
-                lightData = transform.getLightAndBrightness(context.getLevel());
+                lightData = resolveLightData(transform, context);
                 overlay = transform.getOverlay();
                 emissive = transform.emissiveStrength;
             } else {
@@ -147,7 +161,16 @@ public class MCBackend extends Backend<MCBridge, BackendInstance, MCBackendConte
                 emissive = 1f;
             }
 
+            MCBackendContext.ItemLighting itemLighting = context.getItemLighting();
+            if (itemLighting != null) {
+                lightData = new LightData(0, 0, itemLighting.packedLight(), 1f);
+                overlay = itemLighting.packedOverlay();
+            }
+
             BackendInstance instance = renderable.apply();
+            instance.setLighting(itemLighting == null
+                    ? ModelLighting.world(model.getLightingMode(), context.getLevel())
+                    : ModelLighting.item(model.getLightingMode()));
             instance.renderInFrame(renderFrameToken);
             float ambientLightEnhancement = effectiveAmbientLightEnhancement(
                     model, BackendInstance.isIrisEnabled());
@@ -155,7 +178,7 @@ public class MCBackend extends Backend<MCBridge, BackendInstance, MCBackendConte
             if (prepared != null) {
                 if (instance.prepareDraw(pass)) {
                     prepared.add(new PreparedModelDraw(instance, poseStack.last().copy(),
-                            emissive, ambientLightEnhancement));
+                            emissive, ambientLightEnhancement, model.getDepthBias(), instance.lighting()));
                 }
             } else if (pass != ModelRenderPass.TRANSLUCENT && globalBatcher.isCollecting()
                     && globalBatcher.submit(instance, pass, poseStack.last().pose(), poseStack.last().normal(),
@@ -185,20 +208,34 @@ public class MCBackend extends Backend<MCBridge, BackendInstance, MCBackendConte
     }
 
     record PreparedModelDraw(BackendInstance instance, PoseStack.Pose pose,
-                             float emissive, float ambientLightEnhancement) {
+                             float emissive, float ambientLightEnhancement,
+                             DepthBias depthBias, ModelLighting lighting) {
+        PreparedModelDraw(BackendInstance instance, PoseStack.Pose pose,
+                          float emissive, float ambientLightEnhancement, DepthBias depthBias) {
+            this(instance, pose, emissive, ambientLightEnhancement, depthBias, instance.lighting());
+        }
+
         void draw(MCBackendContext context, int mode) {
             draw(context, RenderState.getRenderType(false, ModelRenderPass.OPAQUE), mode);
         }
 
         void draw(MCBackendContext context, RenderType renderType, int mode) {
+            instance.setLighting(lighting);
             instance.drawPreparedBuffer(ModelRenderPass.TRANSLUCENT, pose, renderType,
                     context.getModelViewMatrix(), context.getProjectionMatrix(),
-                    emissive, ambientLightEnhancement, mode);
+                    emissive, ambientLightEnhancement, mode, depthBias);
         }
     }
 
     static float effectiveAmbientLightEnhancement(ModelInstance model, boolean irisEnabled) {
         return irisEnabled ? 1f : model.getAmbientLightEnhancement();
+    }
+
+    static LightData resolveLightData(BackendTransform transform, MCBackendContext context) {
+        MCBackendContext.ItemLighting itemLighting = context.getItemLighting();
+        return itemLighting == null
+                ? transform.getLightAndBrightness(context.getLevel())
+                : new LightData(0, 0, itemLighting.packedLight(), 1f);
     }
 
     /**
@@ -440,7 +477,12 @@ public class MCBackend extends Backend<MCBridge, BackendInstance, MCBackendConte
         sampledThisFrame.forget(model);
         boolean stillMounted = getRenderingObjects().values().stream()
                 .anyMatch(context -> context.getModelInstance() == model);
-        if (!stillMounted) getScheduler().detach(model);
+        if (!stillMounted) {
+            getScheduler().detach(model);
+            if (lib.kasuga.rendering.models.mc.dynamic.ModelParticleRuntime.module(model) != null
+                    || lib.kasuga.rendering.models.mc.dynamic.ModelLightRuntime.module(model) != null)
+                lib.kasuga.rendering.models.mc.dynamic.MinecraftModelRuntime.unregister(model);
+        }
     }
 
     @Override
